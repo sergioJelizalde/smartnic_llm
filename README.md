@@ -110,3 +110,4 @@ Run GPU:
 ```powershell
 python .\benchmark.py cuda
 ```
+> **Note:** Use `python3` on Linux/WSL and `python` on Windows/Anaconda when running the benchmark.
