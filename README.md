@@ -2,8 +2,6 @@
 
 This repository runs a Python benchmark for comparing SentenceTransformer embedding performance on CPU and GPU/CUDA.
 
-This benchmark does not require DPDK, SmartNIC setup, packet capture, Makefile, C compiler, or Linux networking configuration.
-
 ## Requirements
 
 - Anaconda or Miniconda
@@ -12,11 +10,34 @@ This benchmark does not require DPDK, SmartNIC setup, packet capture, Makefile, 
 - Email input files named `message_*.eml`
 - Optional: NVIDIA GPU for CUDA runs
 
-## Clone Repository
+## Build DPDK SMTP Extractor
 
-```powershell
-git clone https://github.com/sergioJelizalde/smartnic_llm.git
+```bash
+make
 ```
+
+This builds the DPDK SMTP extractor and creates the executable:
+
+```bash
+./build/smtp_extract
+```
+
+## Run DPDK SMTP Extractor
+
+```bash
+sudo ./build/smtp_extract -l 0 -n 4 -- -p 0x1
+```
+
+Arguments:
+
+```text
+-l 0      use logical core 0
+-n 4      use 4 memory channels
+--        separates DPDK EAL arguments from application arguments
+-p 0x1    application port mask, use port 0
+```
+
+After the extractor writes `message_*.eml` files, run the benchmark.
 
 ## Create Environment
 
