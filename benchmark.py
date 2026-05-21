@@ -5,13 +5,27 @@ quick_benchmark.py - Minimal latency test for all-MiniLM-L6-v2
 
 import time
 import glob
+import sys
+import torch
 from sentence_transformers import SentenceTransformer
 
 def quick_benchmark():
     # Load model
     print("Loading model...")
     start = time.time()
-    model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+    
+    device = sys.argv[1] if len(sys.argv) > 1 else "cpu"
+
+    if device == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA requested but PyTorch cannot see your GPU")
+
+    print(f"Running on: {device}")
+
+    model = SentenceTransformer(
+        'sentence-transformers/all-MiniLM-L6-v2',
+        device=device
+    )
+
     load_time = (time.time() - start) * 1000
     print(f"Model loaded in {load_time:.2f} ms")
     
