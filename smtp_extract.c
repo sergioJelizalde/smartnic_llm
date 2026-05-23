@@ -5,9 +5,9 @@
  * bidirectionally between port 0 and port 1.
  *
  * Important behavior:
- *   - ARP is forwarded transparently.
- *   - ICMP ping requests and replies are forwarded.
- *   - SMTP DATA bodies on TCP dst port 25 are extracted.
+ *   - ARP is forwarded transparently (no replies generated)
+ *   - ICMP ping requests and replies are forwarded
+ *   - SMTP DATA bodies on TCP dst port 25 are extracted
  */
 
 #include <stdint.h>
@@ -501,10 +501,6 @@ analyze_smtp(struct rte_mbuf *m, uint64_t now)
 
     /*
      * Handle fragmented packets.
-     *
-     * Note: For a pure forwarder, reassembly should ideally happen on a clone.
-     * This code keeps your original behavior. Avoid testing SMTP extraction
-     * with fragmented packets until basic forwarding is confirmed.
      */
     if (rte_ipv4_frag_pkt_is_fragmented(ip)) {
         m->l2_len = sizeof(struct rte_ether_hdr);
@@ -605,6 +601,7 @@ process_capture_packet(struct rte_mbuf *m, uint64_t now)
     struct rte_ether_hdr *eth =
         rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
+    /* Count and forward ARP packets (no special handling) */
     if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP)) {
         g_arp_pkts++;
         forward_packet(m, FORWARD_PORT);
@@ -628,6 +625,7 @@ process_capture_packet(struct rte_mbuf *m, uint64_t now)
         }
     }
 
+    /* Forward all other packets */
     forward_packet(m, FORWARD_PORT);
 }
 
@@ -637,6 +635,7 @@ process_forward_packet(struct rte_mbuf *m)
     struct rte_ether_hdr *eth =
         rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
+    /* Count and forward ARP packets (no special handling) */
     if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP)) {
         g_arp_pkts++;
         forward_packet(m, CAPTURE_PORT);
@@ -654,6 +653,7 @@ process_forward_packet(struct rte_mbuf *m)
         }
     }
 
+    /* Forward all other packets */
     forward_packet(m, CAPTURE_PORT);
 }
 
@@ -813,7 +813,7 @@ main(int argc, char **argv)
     printf("========================================\n");
     printf("Port %u <----> Port %u\n", CAPTURE_PORT, FORWARD_PORT);
     printf("Mode: transparent bidirectional L2 forwarding\n");
-    printf("ARP: forwarded transparently\n");
+    printf("ARP: forwarded transparently (no replies generated)\n");
     printf("ICMP: forwarded both directions\n");
     printf("SMTP: extracting TCP dst port %d from port %u -> port %u\n",
            SMTP_PORT,
