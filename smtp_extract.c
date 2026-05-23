@@ -100,6 +100,9 @@ static uint64_t    g_icmp_pkts, g_arp_pkts;
 static struct rte_ip_frag_tbl       *g_frag_tbl;
 static struct rte_ip_frag_death_row  g_death_row;
 
+/* Forward function prototype */
+static void forward_packet(struct rte_mbuf *m, uint16_t out_port);
+
 /* --------------------------- ARP handling -------------------------------- */
 
 static void
@@ -130,16 +133,20 @@ send_arp_reply(struct rte_mbuf *m, uint16_t out_port)
     
     /* Create new mbuf for ARP reply */
     struct rte_mbuf *reply = rte_pktmbuf_alloc(m->pool);
-    if (!reply) return;
+    if (!reply) {
+        rte_pktmbuf_free(m);
+        return;
+    }
     
     struct rte_ether_hdr *reply_eth = rte_pktmbuf_mtod(reply, struct rte_ether_hdr *);
     struct rte_arp_hdr *reply_arp = (struct rte_arp_hdr *)(reply_eth + 1);
     
-    /* Ethernet header */
-    memcpy(reply_eth->dst_addr, eth->src_addr, RTE_ETHER_ADDR_LEN);
-    /* Get our MAC address for src */
+    /* Get our MAC address */
     struct rte_eth_dev_info dev_info;
     rte_eth_dev_info_get(out_port, &dev_info);
+    
+    /* Ethernet header */
+    memcpy(reply_eth->dst_addr, eth->src_addr, RTE_ETHER_ADDR_LEN);
     memcpy(reply_eth->src_addr, dev_info.default_mac_addr, RTE_ETHER_ADDR_LEN);
     reply_eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP);
     
@@ -161,11 +168,15 @@ send_arp_reply(struct rte_mbuf *m, uint16_t out_port)
     reply->pkt_len = sizeof(struct rte_ether_hdr) + sizeof(struct rte_arp_hdr);
     reply->data_len = reply->pkt_len;
     
-    /* Cache ARP mapping */
-    arp_cache_add(rte_be_to_cpu_32(arp->arp_data.arp_spa), eth->src_addr);
+    /* Cache ARP mapping - convert network to host byte order */
+    uint32_t src_ip = rte_be_to_cpu_32(arp->arp_data.arp_spa);
+    arp_cache_add(src_ip, eth->src_addr);
     
     /* Send reply */
     forward_packet(reply, out_port);
+    
+    /* Free original packet */
+    rte_pktmbuf_free(m);
 }
 
 /* Process ARP packet */
@@ -180,6 +191,7 @@ process_arp_packet(struct rte_mbuf *m, uint16_t out_port)
     if (rte_be_to_cpu_16(arp->arp_opcode) == 1) {
         /* This is an ARP request - send reply */
         send_arp_reply(m, out_port);
+        return;
     }
     
     /* Forward the original ARP packet as well */
@@ -546,12 +558,10 @@ process_capture_packet(struct rte_mbuf *m, uint64_t now)
         if (ip->next_proto_id == IPPROTO_ICMP) {
             /* Handle ICMP (ping) */
             process_icmp_packet(m, ip, FORWARD_PORT);
-            
-            /* Also analyze SMTP if needed (ICMP isn't SMTP, so just return) */
             return;
         }
         else if (ip->next_proto_id == IPPROTO_TCP) {
-            /* Analyze SMTP first */
+            /* Analyze SMTP first (pass a copy or original? We'll analyze then forward) */
             analyze_smtp(m, now);
             
             /* Then forward the packet */
