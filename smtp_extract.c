@@ -106,7 +106,7 @@ static void forward_packet(struct rte_mbuf *m, uint16_t out_port);
 /* --------------------------- ARP handling -------------------------------- */
 
 static void
-arp_cache_add(uint32_t ip, uint8_t *mac)
+arp_cache_add(uint32_t ip, const uint8_t *mac)
 {
     uint32_t idx = ip % ARP_CACHE_SIZE;
     g_arp_cache[idx].ip = ip;
@@ -124,58 +124,63 @@ arp_cache_lookup(uint32_t ip)
     return NULL;
 }
 
-/* Send ARP reply */
 static void
 send_arp_reply(struct rte_mbuf *m, uint16_t out_port)
 {
     struct rte_ether_hdr *eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
     struct rte_arp_hdr *arp = (struct rte_arp_hdr *)(eth + 1);
-    
-    /* Create new mbuf for ARP reply */
+
     struct rte_mbuf *reply = rte_pktmbuf_alloc(m->pool);
     if (!reply) {
         rte_pktmbuf_free(m);
         return;
     }
-    
-    struct rte_ether_hdr *reply_eth = rte_pktmbuf_mtod(reply, struct rte_ether_hdr *);
-    struct rte_arp_hdr *reply_arp = (struct rte_arp_hdr *)(reply_eth + 1);
-    
-    /* Get our MAC address */
-    struct rte_eth_dev_info dev_info;
-    rte_eth_dev_info_get(out_port, &dev_info);
-    
-    /* Ethernet header */
-    memcpy(reply_eth->dst_addr, eth->src_addr, RTE_ETHER_ADDR_LEN);
-    memcpy(reply_eth->src_addr, dev_info.default_mac_addr, RTE_ETHER_ADDR_LEN);
+
+    struct rte_ether_hdr *reply_eth =
+        rte_pktmbuf_mtod(reply, struct rte_ether_hdr *);
+    struct rte_arp_hdr *reply_arp =
+        (struct rte_arp_hdr *)(reply_eth + 1);
+
+    struct rte_ether_addr port_mac;
+    rte_eth_macaddr_get(out_port, &port_mac);
+
+    /*
+     * Ethernet header
+     */
+    rte_ether_addr_copy(&eth->src_addr, &reply_eth->dst_addr);
+    rte_ether_addr_copy(&port_mac, &reply_eth->src_addr);
     reply_eth->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP);
-    
-    /* ARP reply */
-    reply_arp->arp_hardware = rte_cpu_to_be_16(1); /* Ethernet */
+
+    /*
+     * ARP reply
+     */
+    reply_arp->arp_hardware = rte_cpu_to_be_16(RTE_ARP_HRD_ETHER);
     reply_arp->arp_protocol = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
     reply_arp->arp_hlen = RTE_ETHER_ADDR_LEN;
-    reply_arp->arp_plen = 4;
-    reply_arp->arp_opcode = rte_cpu_to_be_16(2); /* Reply */
-    
-    /* Target is the sender of request */
-    memcpy(reply_arp->arp_data.arp_tha, eth->src_addr, RTE_ETHER_ADDR_LEN);
-    reply_arp->arp_data.arp_tpa = arp->arp_data.arp_spa;
-    
-    /* Sender is us */
-    memcpy(reply_arp->arp_data.arp_sha, dev_info.default_mac_addr, RTE_ETHER_ADDR_LEN);
-    reply_arp->arp_data.arp_spa = arp->arp_data.arp_tpa;
-    
+    reply_arp->arp_plen = sizeof(uint32_t);
+    reply_arp->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
+
+    /*
+     * Sender of reply = this DPDK port
+     * Target of reply = original requester
+     */
+    rte_ether_addr_copy(&port_mac, &reply_arp->arp_data.arp_sha);
+    reply_arp->arp_data.arp_sip = arp->arp_data.arp_tip;
+
+    rte_ether_addr_copy(&eth->src_addr, &reply_arp->arp_data.arp_tha);
+    reply_arp->arp_data.arp_tip = arp->arp_data.arp_sip;
+
     reply->pkt_len = sizeof(struct rte_ether_hdr) + sizeof(struct rte_arp_hdr);
     reply->data_len = reply->pkt_len;
-    
-    /* Cache ARP mapping - convert network to host byte order */
-    uint32_t src_ip = rte_be_to_cpu_32(arp->arp_data.arp_spa);
-    arp_cache_add(src_ip, eth->src_addr);
-    
-    /* Send reply */
+
+    /*
+     * Cache requester IP -> MAC.
+     */
+    uint32_t src_ip = rte_be_to_cpu_32(arp->arp_data.arp_sip);
+    arp_cache_add(src_ip, eth->src_addr.addr_bytes);
+
     forward_packet(reply, out_port);
-    
-    /* Free original packet */
+
     rte_pktmbuf_free(m);
 }
 
