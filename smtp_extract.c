@@ -1,5 +1,5 @@
 /*
- * smtp_extract.c — Bidirectional forwarder + SMTP analyzer (with debug)
+ * smtp_extract.c — Bidirectional forwarder + SMTP analyzer (clean)
  */
 
 #include <stdint.h>
@@ -46,11 +46,6 @@
 #define FRAG_TTL_MS          1000
 #define DEATH_ROW_PREFETCH   3
 
-/* Debug flags */
-#define DEBUG_ICMP 1
-#define DEBUG_ARP  1
-#define DEBUG_TX   1
-
 /* ------------------------- reassembly structures -------------------------- */
 
 struct seg {
@@ -89,11 +84,7 @@ static int      g_email_count;
 static uint64_t g_pkts_rx;
 static uint64_t g_pkts_tx;
 static uint64_t g_active_flows;
-static uint64_t g_icmp_req;
-static uint64_t g_icmp_reply;
-static uint64_t g_arp_pkts;
 static uint64_t g_tx_drops;
-static uint64_t g_other_pkts;
 
 /* IPv4 reassembly state */
 static struct rte_ip_frag_tbl       *g_frag_tbl;
@@ -448,65 +439,16 @@ smtp_scan(struct flow *f)
 /* ----------------------- packet forwarding helpers ------------------------ */
 
 static void
-forward_packet(struct rte_mbuf *m, uint16_t out_port, const char *direction)
+forward_packet(struct rte_mbuf *m, uint16_t out_port)
 {
-    /* 
-     * For transparent bridging, we should NOT modify the packet at all.
-     * The packet should be forwarded exactly as received.
-     * The destination MAC determines which port it goes to.
-     * 
-     * If you need to modify MACs (for routing/NAT), uncomment the appropriate section.
-     */
-    
-    /* Send packet without any modification (true transparent bridging) */
     uint16_t nb_tx = rte_eth_tx_burst(out_port, 0, &m, 1);
 
     if (nb_tx == 1) {
         g_pkts_tx++;
-#if DEBUG_TX
-        struct rte_ether_hdr *eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
-        printf("[TX] %s -> port %u (dst MAC: %02x:%02x:%02x:%02x:%02x:%02x)\n", 
-               direction, out_port,
-               eth->dst_addr.addr_bytes[0],
-               eth->dst_addr.addr_bytes[1],
-               eth->dst_addr.addr_bytes[2],
-               eth->dst_addr.addr_bytes[3],
-               eth->dst_addr.addr_bytes[4],
-               eth->dst_addr.addr_bytes[5]);
-#endif
     } else {
         g_tx_drops++;
-        printf("[TX-DROP] Failed to send packet on port %u (%s)\n", out_port, direction);
         rte_pktmbuf_free(m);
     }
-}
-
-static void
-print_icmp_packet(const char *tag, struct rte_ipv4_hdr *ip)
-{
-    uint32_t src_ip = rte_be_to_cpu_32(ip->src_addr);
-    uint32_t dst_ip = rte_be_to_cpu_32(ip->dst_addr);
-
-    uint32_t ip_hlen = rte_ipv4_hdr_len(ip);
-    struct rte_icmp_hdr *icmp =
-        (struct rte_icmp_hdr *)((uint8_t *)ip + ip_hlen);
-
-    const char *type_str = (icmp->icmp_type == 8) ? "REQUEST" :
-                           (icmp->icmp_type == 0) ? "REPLY" : "OTHER";
-
-    printf("[ICMP %s] %s %u.%u.%u.%u -> %u.%u.%u.%u type=%u code=%u\n",
-           type_str,
-           tag,
-           (src_ip >> 24) & 0xff,
-           (src_ip >> 16) & 0xff,
-           (src_ip >> 8) & 0xff,
-           src_ip & 0xff,
-           (dst_ip >> 24) & 0xff,
-           (dst_ip >> 16) & 0xff,
-           (dst_ip >> 8) & 0xff,
-           dst_ip & 0xff,
-           icmp->icmp_type,
-           icmp->icmp_code);
 }
 
 /* ----------------------- SMTP packet analyzer ----------------------------- */
@@ -522,9 +464,6 @@ analyze_smtp(struct rte_mbuf *m, uint64_t now)
 
     struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
 
-    /*
-     * Handle fragmented packets.
-     */
     if (rte_ipv4_frag_pkt_is_fragmented(ip)) {
         m->l2_len = sizeof(struct rte_ether_hdr);
         m->l3_len = rte_ipv4_hdr_len(ip);
@@ -553,9 +492,6 @@ analyze_smtp(struct rte_mbuf *m, uint64_t now)
     struct rte_tcp_hdr *tcp =
         (struct rte_tcp_hdr *)((uint8_t *)ip + ip_hlen);
 
-    /*
-     * Only analyze client -> server SMTP.
-     */
     if (tcp->dst_port != rte_cpu_to_be_16(SMTP_PORT))
         return;
 
@@ -624,13 +560,8 @@ process_capture_packet(struct rte_mbuf *m, uint64_t now)
     struct rte_ether_hdr *eth =
         rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-    /* Handle ARP packets */
     if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP)) {
-        g_arp_pkts++;
-#if DEBUG_ARP
-        printf("[ARP] 0->1 forwarding\n");
-#endif
-        forward_packet(m, FORWARD_PORT, "ARP_0->1");
+        forward_packet(m, FORWARD_PORT);
         return;
     }
 
@@ -638,31 +569,18 @@ process_capture_packet(struct rte_mbuf *m, uint64_t now)
         struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
 
         if (ip->next_proto_id == IPPROTO_ICMP) {
-            uint32_t ip_hlen = rte_ipv4_hdr_len(ip);
-            struct rte_icmp_hdr *icmp =
-                (struct rte_icmp_hdr *)((uint8_t *)ip + ip_hlen);
-            
-            if (icmp->icmp_type == 8) {
-                g_icmp_req++;
-            } else if (icmp->icmp_type == 0) {
-                g_icmp_reply++;
-            }
-            
-            print_icmp_packet("0->1", ip);
-            forward_packet(m, FORWARD_PORT, "ICMP_0->1");
+            forward_packet(m, FORWARD_PORT);
             return;
         }
 
         if (ip->next_proto_id == IPPROTO_TCP) {
             analyze_smtp(m, now);
-            forward_packet(m, FORWARD_PORT, "TCP_0->1");
+            forward_packet(m, FORWARD_PORT);
             return;
         }
     }
 
-    /* Forward all other packets */
-    g_other_pkts++;
-    forward_packet(m, FORWARD_PORT, "OTHER_0->1");
+    forward_packet(m, FORWARD_PORT);
 }
 
 static void
@@ -671,13 +589,8 @@ process_forward_packet(struct rte_mbuf *m)
     struct rte_ether_hdr *eth =
         rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
 
-    /* Handle ARP packets */
     if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP)) {
-        g_arp_pkts++;
-#if DEBUG_ARP
-        printf("[ARP] 1->0 forwarding\n");
-#endif
-        forward_packet(m, CAPTURE_PORT, "ARP_1->0");
+        forward_packet(m, CAPTURE_PORT);
         return;
     }
 
@@ -685,25 +598,12 @@ process_forward_packet(struct rte_mbuf *m)
         struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
 
         if (ip->next_proto_id == IPPROTO_ICMP) {
-            uint32_t ip_hlen = rte_ipv4_hdr_len(ip);
-            struct rte_icmp_hdr *icmp =
-                (struct rte_icmp_hdr *)((uint8_t *)ip + ip_hlen);
-            
-            if (icmp->icmp_type == 8) {
-                g_icmp_req++;
-            } else if (icmp->icmp_type == 0) {
-                g_icmp_reply++;
-            }
-            
-            print_icmp_packet("1->0", ip);
-            forward_packet(m, CAPTURE_PORT, "ICMP_1->0");
+            forward_packet(m, CAPTURE_PORT);
             return;
         }
     }
 
-    /* Forward all other packets */
-    g_other_pkts++;
-    forward_packet(m, CAPTURE_PORT, "OTHER_1->0");
+    forward_packet(m, CAPTURE_PORT);
 }
 
 /* ----------------------------- aging / stats ------------------------------ */
@@ -861,17 +761,7 @@ main(int argc, char **argv)
     printf("SMTP Extractor + Transparent Forwarder\n");
     printf("========================================\n");
     printf("Port %u <----> Port %u\n", CAPTURE_PORT, FORWARD_PORT);
-    printf("Mode: transparent bidirectional L2 forwarding\n");
-    printf("ARP: forwarded transparently (no replies generated)\n");
-    printf("ICMP: forwarded both directions\n");
-    printf("SMTP: extracting TCP dst port %d from port %u -> port %u\n",
-           SMTP_PORT,
-           CAPTURE_PORT,
-           FORWARD_PORT);
-    printf("\nNOTE: Make sure 172.16.1.3 is reachable and has proper ARP entries\n");
-    printf("      You may need to add static ARP on both sides:\n");
-    printf("      arp -s 172.16.1.1 <MAC of port 0>\n");
-    printf("      arp -s 172.16.1.3 <MAC of port 1>\n");
+    printf("SMTP parsing on port %d (capture -> forward)\n", SMTP_PORT);
     printf("========================================\n\n");
 
     while (!g_force_quit) {
@@ -912,21 +802,12 @@ main(int argc, char **argv)
                    " TX=%" PRIu64
                    " TX_DROP=%" PRIu64
                    " | flows=%" PRIu64
-                   " | emails=%d"
-                   " | ICMP_REQ=%" PRIu64
-                   " | ICMP_REPLY=%" PRIu64
-                   " | ARP=%" PRIu64
-                   " | OTHER=%" PRIu64
-                   "\n",
+                   " | emails=%d\n",
                    g_pkts_rx,
                    g_pkts_tx,
                    g_tx_drops,
                    g_active_flows,
-                   g_email_count,
-                   g_icmp_req,
-                   g_icmp_reply,
-                   g_arp_pkts,
-                   g_other_pkts);
+                   g_email_count);
 
             fflush(stdout);
             next_age = now + age_cyc;
@@ -940,10 +821,6 @@ main(int argc, char **argv)
     printf("Packets forwarded:      %" PRIu64 "\n", g_pkts_tx);
     printf("TX drops:               %" PRIu64 "\n", g_tx_drops);
     printf("SMTP emails extracted:  %d\n", g_email_count);
-    printf("ICMP Requests:          %" PRIu64 "\n", g_icmp_req);
-    printf("ICMP Replies:           %" PRIu64 "\n", g_icmp_reply);
-    printf("ARP packets:            %" PRIu64 "\n", g_arp_pkts);
-    printf("Other packets:          %" PRIu64 "\n", g_other_pkts);
     printf("Active flows at exit:   %" PRIu64 "\n", g_active_flows);
     printf("========================================\n");
 
