@@ -450,20 +450,73 @@ smtp_scan(struct flow *f)
 static void
 forward_packet(struct rte_mbuf *m, uint16_t out_port, const char *direction)
 {
+    struct rte_ether_hdr *eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+    
+    /* Get the output port's MAC address */
+    struct rte_eth_dev_info dev_info;
+    if (rte_eth_dev_info_get(out_port, &dev_info) != 0) {
+        printf("[ERROR] Failed to get dev info for port %u\n", out_port);
+        rte_pktmbuf_free(m);
+        g_tx_drops++;
+        return;
+    }
+    
+    /* ===== MAC Address Translation ===== */
+    /* 
+     * For transparent bridging between two networks:
+     * - Source MAC becomes the output port's MAC (since it's now sending)
+     * - Destination MAC stays the same (will reach its destination via ARP)
+     * 
+     * Alternative: Swap src/dst if you want to reflect back to sender
+     */
+    
+    /* Set source MAC to output port's MAC */
+    memcpy(eth->src_addr.addr_bytes, 
+           dev_info.default_mac_addr, 
+           RTE_ETHER_ADDR_LEN);
+    
+    /* Keep destination MAC unchanged (let ARP handle it) */
+    
+    /* ===== Optional: Decrement TTL ===== */
+    if (eth->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+        struct rte_ipv4_hdr *ip = (struct rte_ipv4_hdr *)(eth + 1);
+        
+        /* Check TTL before decrementing */
+        if (ip->time_to_live <= 1) {
+            printf("[WARN] TTL expired for packet\n");
+            rte_pktmbuf_free(m);
+            return;
+        }
+        
+        /* Decrement TTL */
+        ip->time_to_live--;
+        
+        /* Recalculate IP checksum after modifying TTL */
+        ip->hdr_checksum = 0;
+        ip->hdr_checksum = rte_ipv4_cksum(ip);
+    }
+    
+    /* ===== Send Packet ===== */
     uint16_t nb_tx = rte_eth_tx_burst(out_port, 0, &m, 1);
 
     if (nb_tx == 1) {
         g_pkts_tx++;
 #if DEBUG_TX
-        printf("[TX] %s -> port %u\n", direction, out_port);
+        printf("[TX] %s -> port %u (MAC: %02x:%02x:%02x:%02x:%02x:%02x)\n", 
+               direction, out_port,
+               eth->src_addr.addr_bytes[0],
+               eth->src_addr.addr_bytes[1],
+               eth->src_addr.addr_bytes[2],
+               eth->src_addr.addr_bytes[3],
+               eth->src_addr.addr_bytes[4],
+               eth->src_addr.addr_bytes[5]);
 #endif
     } else {
         g_tx_drops++;
-        printf("[TX-DROP] failed to send packet on port %u (%s)\n", out_port, direction);
+        printf("[TX-DROP] Failed to send packet on port %u (%s)\n", out_port, direction);
         rte_pktmbuf_free(m);
     }
 }
-
 static void
 print_icmp_packet(const char *tag, struct rte_ipv4_hdr *ip)
 {
